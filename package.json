@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
-    "test": "node test/sim_test.js && node test/room_test.js"
+    "test": "node test/sim_test.js && node test/room_test.js && node test/deep_link_test.js && node test/terrain_test.js"
   },
   "dependencies": {
     "@colyseus/core": "^0.16.26",

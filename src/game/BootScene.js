@@ -7,6 +7,7 @@ import { mapToTiled } from "./tiled.js";
 import { plistToPhaserAtlas } from "./plist.js";
 import { SND_NAMES } from "./Sfx.js";
 import { GameMap } from "../../shared/map.js";
+import { resolveMapId } from "../../shared/constants.js";
 
 export class BootScene extends Phaser.Scene {
   constructor() { super("boot"); }
@@ -14,6 +15,10 @@ export class BootScene extends Phaser.Scene {
     /* Phaser passes {} when a config-array scene auto-starts — fall back to
        the boot opts stashed on the game registry by createGame() */
     this.opts = (opts && opts.map) ? opts : (this.registry.get("bootOpts") || {});
+    /* coerce before preload queues the fetch: an unknown id 404s the map JSON
+       (dev server answers index.html), which used to kill JSON.parse below
+       and hang on a blank page */
+    this.opts.map = resolveMapId(this.opts.map);
   }
 
   preload() {
@@ -43,7 +48,20 @@ export class BootScene extends Phaser.Scene {
   }
 
   create() {
-    try { this.createInner(); } catch (e) { window.__bootErr = (window.__bootErr || "") + "|boot:" + (e && e.stack || e); console.error("boot create failed", e); }
+    try { this.createInner(); } catch (e) {
+      window.__bootErr = (window.__bootErr || "") + "|boot:" + (e && e.stack || e);
+      console.error("boot create failed", e);
+      /* never strand the user on a blank page — say what failed */
+      try {
+        const W = this.scale.width, H = this.scale.height;
+        this.add.text(W / 2, H / 2 - 10, "failed to load map \"" + (this.opts && this.opts.map) + "\"", {
+          fontFamily: "Trebuchet MS", fontSize: "16px", color: "#e74c3c", align: "center",
+        }).setOrigin(0.5);
+        this.add.text(W / 2, H / 2 + 18, String((e && e.message) || e).slice(0, 160), {
+          fontFamily: "Trebuchet MS", fontSize: "12px", color: "#9fb4c8", align: "center",
+        }).setOrigin(0.5);
+      } catch (_) { /* last resort: error is already in console + __bootErr */ }
+    }
   }
 
   createInner() {

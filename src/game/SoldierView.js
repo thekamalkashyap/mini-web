@@ -5,7 +5,7 @@
    Part orientation golden rule: ALL art faces RIGHT naturally — only the
    outer container mirror turns the soldier (never per-part flips). */
 import Phaser from "phaser";
-import { clamp, TAU, rnd, SPR } from "../../shared/constants.js";
+import { clamp, TAU, rnd, SPR, partOrigin, SOLDIER_W, SOLDIER_H, LEG_LIFT } from "../../shared/constants.js";
 import { WEAPONS } from "../../shared/weapons.js";
 
 const ATLAS = "menu";
@@ -67,11 +67,13 @@ export class SoldierView {
     if (!visible) { this.shieldRing.setVisible(false); return; }
 
     /* drop shadow on the ground below (canopy art reads as air otherwise) */
-    const ground = this.scene.map.groundBelow(s.x + 22, s.y + 104, 420);
+    const sw = s.w || SOLDIER_W, sh = s.h || SOLDIER_H;
+    const feetX = s.x + sw / 2, feetY = s.y + sh;
+    const ground = this.scene.map.groundBelow(feetX, feetY, 420);
     if (ground) {
-      const d = ground.y - (s.y + 104);
+      const d = ground.y - feetY;
       this.shadow.setVisible(true);
-      this.shadow.setPosition(s.x + 22, ground.y - 3);
+      this.shadow.setPosition(feetX, ground.y - 3);
       const sx = clamp(24 - d * 0.05, 9, 24), sy = clamp(6 - d * 0.012, 2.5, 6);
       this.shadow.setScale(sx / 24, sy / 6);
       this.shadow.setFillStyle(0x000000, clamp(0.30 - d * 0.0009, 0.06, 0.30));
@@ -85,31 +87,40 @@ export class SoldierView {
 
     const walk = s.walkT ? Math.sin(s.walkT * 10) : 0;
     const bob = s.grounded && s.walkT ? Math.abs(Math.cos(s.walkT * 10)) * 2 : 0;
-    this.root.setPosition(s.x + 22, s.y + 104 - bob);
+    this.root.setPosition(s.x + sw / 2, s.y + sh - bob);
     this.root.setScale(s.facing, 1);   /* containers have no setScaleX */
     this.root.setAlpha(s.invuln > 0 && Math.floor(time * 12) % 2 === 0 ? 0.35 : 1);
 
     const legSwing = s.walkT ? walk * 0.35 : 0;
-    const set = (img, x, y, ax, ay, rot = 0, alpha = 1) => {
-      img.setPosition(x, y).setOrigin(ax, ay).setRotation(rot).setScale(SPR).setAlpha(alpha);
+    /* Legacy drawA anchored parts to the FULL source box (trim included);
+       Phaser anchors to the trimmed quad — convert each legacy anchor so
+       joints land exactly where the original put them (no seams). */
+    const set = (img, name, x, y, ax, ay, rot = 0, alpha = 1) => {
+      const b = this.frameBox(name);
+      const [ox, oy] = partOrigin(b.tw, b.th, b.sw, b.sh, ax, ay, b.offX, b.offY);
+      img.setPosition(x, y).setOrigin(ox, oy).setRotation(rot).setScale(SPR).setAlpha(alpha);
     };
-    set(this.legL, -8, -hip, 0.5, 0.08, legSwing);
-    set(this.legR, 8, -hip, 0.5, 0.08, -legSwing);
-    set(this.body, 0, -hip, 0.5, 1);
-    set(this.head, 1, -neck + 9, 0.5, 0.92);
+    set(this.legL, skin.leg, -8, -hip - LEG_LIFT, 0.5, 0.08, legSwing);
+    set(this.legR, skin.leg, 8, -hip - LEG_LIFT, 0.5, 0.08, -legSwing);
+    set(this.body, skin.body, 0, -hip, 0.5, 1);
+    set(this.head, skin.head, 1, -neck + 5, 0.5, 0.92);
 
-    /* gun assembly */
+    /* gun assembly — pivots at the REAR shoulder (the torso edge opposite
+       the facing direction), never the chest center: the container mirrors
+       with facing, so inside it "forward" is +x and the rear edge is -x */
     const w = WEAPONS[s.weaponId] || WEAPONS.m61;
     const gw = (this.scene.frameSizeCache(w.sprite).w || 60) * SPR;
     const gh = (this.scene.frameSizeCache(w.sprite).h || 40) * SPR;
     const kick = clamp((s.recoilT || 0) / (w.kick || 0.08), 0, 1);
     const swing = w.melee && (s.swingT || 0) > 0 ? Math.sin((0.22 - s.swingT) / 0.22 * Math.PI) * 1.4 - 0.7 : 0;
-    this.gun.setPosition(2, -shoulder);
+    const bodyW = (m(skin.body).w || 56) * SPR;
+    const shoulderDx = -bodyW * 0.35;
+    this.gun.setPosition(shoulderDx, -shoulder);
     this.gun.setRotation((s.facing < 0 ? Math.PI - s.aim : s.aim) + swing - kick * 0.10);
-    set(this.armRear, 0, 1, 0.10, 0.5, 0.16 + kick * 0.06);
+    set(this.armRear, skin.arm, 0, 1, 0.10, 0.5, 0.16 + kick * 0.06);
     const gunName = (s.reloading || 0) > 0 && w.empty ? w.empty : w.sprite;
     this.gunImg.setTexture(ATLAS, gunName);
-    set(this.gunImg, -kick * 9, 2, 0.28, 0.58);
+    set(this.gunImg, gunName, -kick * 9, 2, 0.28, 0.58);
 
     /* magazine drop/reinsert while reloading */
     if ((s.reloading || 0) > 0 && w.magFrame) {
@@ -118,7 +129,7 @@ export class SoldierView {
       if (t < 0.42) { const p = t / 0.42; dy = p * p * 44; magRot = p * 0.9; a = 1 - p * 0.9; }
       else if (t > 0.62) { const p = (1 - t) / 0.38; dy = p * p * 44; magRot = p * 0.9; a = 1 - p * 0.85; }
       this.magImg.setVisible(a > 0.03);
-      if (a > 0.03) { this.magImg.setTexture(ATLAS, w.magFrame); set(this.magImg, gw * 0.36 - kick * 9, 4 + gh * 0.30 + dy, 0.5, 0.12, magRot, a); }
+      if (a > 0.03) { this.magImg.setTexture(ATLAS, w.magFrame); set(this.magImg, w.magFrame, gw * 0.36 - kick * 9, 4 + gh * 0.30 + dy, 0.5, 0.12, magRot, a); }
     } else this.magImg.setVisible(false);
 
     /* muzzle flash */
@@ -127,19 +138,37 @@ export class SoldierView {
     this.flashImg.setVisible(showFlash);
     if (showFlash) {
       this.flashImg.setTexture(ATLAS, "flare.png");
-      set(this.flashImg, gw * 0.72 + 6 - kick * 9, 2, 0.5, 0.5, rnd(0, TAU), clamp(this.flashT * 22, 0, 1));
+      set(this.flashImg, "flare.png", gw * 0.72 + 6 - kick * 9, 2, 0.5, 0.5, rnd(0, TAU), clamp(this.flashT * 22, 0, 1));
       this.flashImg.setScale(SPR * (0.55 + Math.random() * 0.35));
     }
-    set(this.armFront, gw * 0.08, 2, 0.10, 0.5, -0.05 - kick * 0.04);
+    set(this.armFront, skin.arm, gw * 0.08, 2, 0.10, 0.5, -0.05 - kick * 0.04);
 
     /* tags + shield */
     this.nameText.setText(s.name || "");
-    this.nameText.setPosition(s.x + 22, s.y - 26);
-    this.hpBg.setPosition(s.x + 22, s.y - 22);
-    this.hpBar.setPosition(s.x + 22 - 25, s.y - 22);
+    this.nameText.setPosition(s.x + sw / 2, s.y - 26);
+    this.hpBg.setPosition(s.x + sw / 2, s.y - 22);
+    this.hpBar.setPosition(s.x + sw / 2 - 25, s.y - 22);
     this.hpBar.width = 50 * clamp((s.hp || 0) / 100, 0, 1);
     this.shieldRing.setVisible((s.shield || 0) > 0);
-    this.shieldRing.setPosition(s.x + 22, s.y + 52);
+    this.shieldRing.setPosition(s.x + sw / 2, s.y + sh / 2);
+  }
+
+  /* Trimmed-frame box for an atlas image: tw/th = drawn quad, sw/sh = the
+     full source box the legacy anchors were authored against, offX/offY =
+     the quad's cocos trim offsets. Source sizes come from the atlas JSON
+     (authoritative, no Phaser-internals guessing). */
+  frameBox(name) {
+    const f = this.scene.textures.getFrame(ATLAS, name);
+    const tw = (f && (f.width || f.cutWidth)) || 0, th = (f && (f.height || f.cutHeight)) || 0;
+    if (!this._plistFrames) {
+      const p = this.scene.cache.json.get("plist:menu");
+      this._plistFrames = (p && p.frames) || {};
+    }
+    const fr = this._plistFrames[name] || {};
+    return {
+      tw, th, sw: fr.srcW || tw, sh: fr.srcH || th,
+      offX: fr.offX || 0, offY: fr.offY || 0,
+    };
   }
 
   destroy() {

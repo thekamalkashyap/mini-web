@@ -9,7 +9,7 @@ import Matter from "matter-js";
 import { WorldSim } from "../../shared/sim.js";
 import { WEAPONS, NADES } from "../../shared/weapons.js";
 import { GameMap } from "../../shared/map.js";
-import { clamp, lerp, rnd, pick, TAU, SPR, skinFor, MAPS } from "../../shared/constants.js";
+import { clamp, lerp, rnd, pick, TAU, SPR, skinFor, MAPS, resolveMapId, SOLDIER_W, SOLDIER_H } from "../../shared/constants.js";
 import { SoldierView } from "./SoldierView.js";
 import { Sfx } from "./Sfx.js";
 import { ClientNet } from "../net/ClientNet.js";
@@ -20,6 +20,7 @@ export class WorldScene extends Phaser.Scene {
 
   init(opts) {
     this.opts = Object.assign({ mode: "solo", map: "1outpost", bots: 0, demo: false, flashHold: false, colliders: false, zoom: 0 }, opts);
+    this.opts.map = resolveMapId(this.opts.map);
   }
 
   create() {
@@ -87,7 +88,7 @@ export class WorldScene extends Phaser.Scene {
 
     /* ---------- input ---------- */
     this.keys = this.input.keyboard.addKeys({
-      left: "A", right: "D", jet: "W", up: "UP", leftA: "LEFT", rightA: "RIGHT", space: "SPACE",
+      left: "A", right: "D", jet: "W", up: "UP", leftA: "LEFT", rightA: "RIGHT", space: "SPACE", use: "E",
     });
     this.input.keyboard.on("keydown-R", () => this.meReload());
     this.input.keyboard.on("keydown-G", () => this.meNade());
@@ -134,21 +135,35 @@ export class WorldScene extends Phaser.Scene {
       else if (ob.name === "spritefg") this.add.image(ob.x, ob.y, "menu", (ob.props.sprite || "") + ".png").setDepth(8).setAlpha(0.95);
       else if (ob.name.startsWith("fp_b")) {
         const sp = ob.props.sprite || "flagStationBlue";
-        this.add.image(ob.x, ob.y + 30, "menu", sp + ".png").setDepth(-3).setAlpha(0.8);
-        const flag = this.add.image(ob.x, ob.y - 40, "menu", sp.includes("Orange") ? "flagOrange.png" : "flagBlue.png").setDepth(-3).setScale(0.55).setAlpha(0.55);
+        this.add.image(ob.x, ob.y + 30, "menu", sp + ".png").setDepth(-3).setScale(0.8);
+        /* flag art is authored horizontal (pole+diamond); stand it upright so
+           the pole plants into the station with the ball finial on top */
+        const flag = this.add.image(ob.x, ob.y - 40, "menu", sp.includes("Orange") ? "flagOrange.png" : "flagBlue.png")
+          .setDepth(-3).setScale(0.55).setRotation(-Math.PI / 2 - 0.08);
         this.tweens.add({ targets: flag, x: "+=4", duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+        this.tweens.add({ targets: flag, rotation: -Math.PI / 2 + 0.08, duration: 900, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
       }
     }
+  }
+
+  /* icons rest ON the settled ground point (bottom-anchored per sprite),
+     with a small hover bob — re-run on sprite swaps (pads cycle items) */
+  layoutPickupView(img, k, sprite, scale) {
+    const halfH = (this.frameSizeCache(sprite).h || 40) * scale / 2;
+    const baseY = k.y - halfH + 3;
+    img.setPosition(k.x, baseY).setScale(scale);
+    this.tweens.killTweensOf(img);
+    this.tweens.add({ targets: img, y: baseY - 4, duration: 1000 + (k.x % 500), yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
   }
 
   buildPickups() {
     for (const k of this.sim.pickups) {
       const id = k.list[k.idx % k.list.length];
       const w = WEAPONS[id] || NADES[id];
-      const img = this.add.image(k.x, k.y - 22, "menu", w ? w.sprite : "m61.png").setDepth(1);
+      const sprite = w ? w.sprite : "m61.png";
       const scale = (w && (w.item || NADES[id])) ? 0.5 : 0.42;
-      img.setScale(scale);
-      this.tweens.add({ targets: img, y: k.y - 28, duration: 1000 + (k.x % 500), yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+      const img = this.add.image(k.x, k.y, "menu", sprite).setDepth(1);
+      this.layoutPickupView(img, k, sprite, scale);
       this.pickupViews.push(img);
     }
   }
@@ -163,7 +178,11 @@ export class WorldScene extends Phaser.Scene {
       const id = k.list ? k.list[idx % k.list.length] : null;
       if (id) {
         const w = WEAPONS[id] || NADES[id];
-        if (w && this.pickupViews[i].frame.name !== w.sprite) this.pickupViews[i].setTexture("menu", w.sprite);
+        const pos = this.sim.pickups[i];
+        if (w && pos && this.pickupViews[i].frame.name !== w.sprite) {
+          this.pickupViews[i].setTexture("menu", w.sprite);
+          this.layoutPickupView(this.pickupViews[i], pos, w.sprite, (w.item || NADES[id]) ? 0.5 : 0.42);
+        }
       }
     }
   }
@@ -234,6 +253,7 @@ export class WorldScene extends Phaser.Scene {
       right: k.right.isDown || k.rightA.isDown,
       jet: k.jet.isDown || k.space.isDown || k.up.isDown,
       fire: !!this.lmb || !!this.demoHold,
+      use: k.use.isDown,
       aimX: wp.x, aimY: wp.y,
     };
     if (this.opts.demo) { inp.fire = true; inp.aimX = this.sim.me ? this.sim.me.cx() + 400 : wp.x; inp.aimY = this.sim.me ? this.sim.me.cy() - 100 : wp.y; }
@@ -301,7 +321,8 @@ export class WorldScene extends Phaser.Scene {
   /* ------------------------------------------------------------ views */
   soldierStateOf(p, showTag) {
     return {
-      x: p.x, y: p.y, aim: p.aim, facing: p.facing, dead: p.dead, invuln: p.invuln,
+      x: p.x, y: p.y, w: p.w || SOLDIER_W, h: p.h || SOLDIER_H,
+      aim: p.aim, facing: p.facing, dead: p.dead, invuln: p.invuln,
       shield: p.shieldT, walkT: p.walkT, grounded: p.grounded, reloading: p.reloading,
       weaponId: p.weaponId, flashT: p.flashT, recoilT: p.recoilT, swingT: p.swingT,
       name: p.name, hp: p.hp, showTag, skin: p.skin,
@@ -375,7 +396,8 @@ export class WorldScene extends Phaser.Scene {
       r.aim = r.aim === undefined ? s.aim : lerp(r.aim, r.taim, 0.3);
       const facing = Math.cos(r.aim) >= 0 ? 1 : -1;
       r.view.update({
-        x: r.x, y: r.y, aim: r.aim, facing, dead: s.dead, invuln: s.invuln,
+        x: r.x, y: r.y, w: SOLDIER_W, h: SOLDIER_H,
+        aim: r.aim, facing, dead: s.dead, invuln: s.invuln,
         shield: s.shield, walkT: s.walkT, grounded: false, reloading: s.reloading,
         weaponId: s.wep, recoilT: 0, swingT: 0, name: s.name, hp: s.hp, showTag: true,
       }, dt, t);
@@ -496,8 +518,18 @@ export class WorldScene extends Phaser.Scene {
     const g = this.colliderGfx;
     g.clear();
     if (!this.sim) return;
-    g.lineStyle(3, 0x3cdc78, 1);
+    /* interior mass reads faint — the eye should follow the surface line */
+    g.lineStyle(1, 0x3cdc78, 0.35);
     for (const r of this.map.solidRects()) g.strokeRect(r.x, r.y, r.w, r.h);
+    const skins = this.map.solidShapes().skins || [];
+    g.fillStyle(0x3cdc78, 0.06);
+    for (const s of skins) {
+      g.fillPoints([{ x: s.x0, y: s.y0 }, { x: s.x1, y: s.y1 },
+        { x: s.x1, y: s.y1 + s.depth }, { x: s.x0, y: s.y0 + s.depth }], true);
+    }
+    /* the walkable surface itself: one diagonal per run, riding the art */
+    g.lineStyle(3, 0xff3b30, 1);
+    for (const s of skins) g.lineBetween(s.x0, s.y0, s.x1, s.y1);
     g.lineStyle(3, 0xff8c28, 1);
     for (const p of this.sim.players) if (!p.dead) g.strokeRect(p.x, p.y, p.w, p.h);
     g.lineStyle(3, 0xffd732, 1);
@@ -508,6 +540,10 @@ export class WorldScene extends Phaser.Scene {
   syncHud() {
     const me = this.opts.mode === "online" ? this.pred : this.sim.me;
     if (!me) return;
+    /* "press E" prompt: a grabbable gun/nade in radius (online also honors
+       the authoritative respawn timers, which the prediction sim can't see) */
+    const schema = this.opts.mode === "online" && this.room ? this.room.state.pickups : null;
+    const near = !me.dead && this.sim.pickupNear(me, schema ? (i => { const s = schema[i]; return !!s && s.respawn > 0; }) : null);
     useStore.getState().actions.setHud({
       hp: me.hp, fuel: me.fuel, ammo: me.ammo, mag: me.weapon.mag, reloading: me.reloading,
       weaponName: me.weapon.name, nades: me.nades, kills: me.kills,
@@ -515,6 +551,7 @@ export class WorldScene extends Phaser.Scene {
       mode: this.opts.mode, players: this.opts.mode === "online" && this.room ? this.room.state.players.size : this.sim.players.length,
       showColliders: this.showColliders, muted: this.sfx.muted,
       connected: this.opts.mode !== "online" || (this.net && this.net.connected),
+      pickupName: near ? near.name : null,
     });
   }
 

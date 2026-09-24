@@ -3,7 +3,7 @@
 import React from "react";
 import { useStore } from "../store.js";
 
-const LEGEND = [["#3cdc78", "terrain"], ["#c85ae6", "boundary"], ["#ff8c28", "soldier"], ["#ffd732", "nade"]];
+const LEGEND = [["#3cdc78", "terrain"], ["#ff3b30", "surface"], ["#c85ae6", "boundary"], ["#ff8c28", "soldier"], ["#ffd732", "nade"]];
 
 export default function Hud() {
   const hud = useStore(s => s.hud);
@@ -12,7 +12,7 @@ export default function Hud() {
   if (!hud) return null;
   const {
     hp, fuel, ammo, mag, reloading, weaponName, nades, kills, dead, deadT,
-    mapLabel, mode, players, showColliders, muted, connected,
+    mapLabel, mode, players, showColliders, muted, connected, pickupName,
   } = hud;
 
   return (
@@ -54,8 +54,14 @@ export default function Hud() {
 
       {/* help + legend */}
       <div style={{ position: "absolute", right: 14, bottom: 12, fontSize: 10, color: "#5f7188", textAlign: "right" }}>
-        WASD move · W jetpack · mouse aim · LMB fire · G nade · R reload · RMB scope · M mute{muted ? " (muted)" : ""}
+        WASD move · W jetpack · mouse aim · LMB fire · E pickup · G nade · R reload · RMB scope · M mute{muted ? " (muted)" : ""}
       </div>
+
+      {pickupName && !dead && (
+        <div style={{ position: "absolute", left: "50%", bottom: 108, transform: "translateX(-50%)", background: "rgba(0,0,0,.63)", borderRadius: 6, padding: "6px 16px", fontSize: 13, fontWeight: "bold", color: "#e8f0f8" }}>
+          Press <span style={{ color: "#ffd76e" }}>E</span> — {pickupName}
+        </div>
+      )}
       {showColliders && (
         <div style={{ position: "absolute", left: 16, bottom: 14, display: "flex", gap: 14 }}>
           {LEGEND.map(([c, l]) => (

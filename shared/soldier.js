@@ -3,7 +3,7 @@
    No rendering, no DOM, no sound side effects: everything observable is exposed
    as state fields (for views) and sim events (for fx/sfx). */
 import Matter from "matter-js";
-import { GRAV, TAU, clamp, lerp, rnd, pick, SPR } from "./constants.js";
+import { GRAV, TAU, clamp, lerp, rnd, pick, SPR, SOLDIER_W, SOLDIER_H } from "./constants.js";
 import { WEAPONS, NADES, fireSoundOf } from "./weapons.js";
 
 export class Soldier {
@@ -11,7 +11,7 @@ export class Soldier {
     this.sim = sim;
     Object.assign(this, {
       id: 0, name: "PLAYER", isBot: false, remote: false, ghost: false,
-      x: 0, y: 0, vx: 0, vy: 0, w: 44, h: 104,
+      x: 0, y: 0, vx: 0, vy: 0, w: SOLDIER_W, h: SOLDIER_H,
       hp: 100, fuel: 100, grounded: false, dead: false, deadT: 0, invuln: 1.2,
       aim: 0, facing: 1, walkT: 0, shootT: 0, flashT: 0, swingT: 0, recoilT: 0,
       weapon: WEAPONS.m61, weaponId: "m61", ammo: 30, reloading: 0, nades: 2,
@@ -25,15 +25,106 @@ export class Soldier {
     if (!this.ghost) this.respawn(true);
   }
 
+  /* Feet-on-ground placement near (sx, sy): spiral out for a clear box with
+     real ground below (never inside rock, never over the void). Flat spots
+     win the first pass — frictionless slopes slide, so spawning mid-slope
+     is no fun; steep-but-standable ground is the fallback. Candidates that
+     would stack on another soldier's box are skipped — squads spawning at
+     one point fan out instead of rendering as one blob. */
+  placeNear(sx, sy) {
+    const map = this.sim.map;
+    const overlapsPlayer = (x, y) => {
+      for (const o of this.sim.players) {
+        if (o === this || o.dead) continue;
+        if (x < o.x + o.w + 16 && x + this.w + 16 > o.x &&
+            y < o.y + o.h + 8 && y + this.h + 8 > o.y) return true;
+      }
+      return false;
+    };
+    const offs = [[0, 0]];
+    for (const r of [24, 48, 96, 160, 260, 420, 640]) {
+      offs.push([-r, 0], [r, 0], [0, -r], [-r, -r], [r, -r], [0, r * 0.5]);
+    }
+    for (const flatOnly of [true, false]) {
+      for (const [dx, dy] of offs) {
+        const cx = clamp(sx + dx, 0, map.w - 1);
+        const g = map.groundBelow(cx, sy + dy - this.h, 600);
+        if (!g) continue;
+        if (flatOnly) {
+          const gl = map.groundBelow(cx - 30, g.y - 40, 120);
+          const gr = map.groundBelow(cx + 30, g.y - 40, 120);
+          if (!gl || !gr || Math.abs(gl.y - gr.y) > 24) continue;
+        }
+        const x = clamp(cx - this.w / 2, 0, map.w - this.w);
+        /* jagged neighbors can clip the box corners — rise minimally until
+           clear (short drop on the first frames, never a float) */
+        for (let lift = 0; lift <= 64; lift += 8) {
+          const y = g.y - this.h - lift;
+          if (y < 0) break;
+          if (map.rectHitsWorld(x, y, this.w, this.h)) continue;
+          if (overlapsPlayer(x, y)) break;   /* same column, higher lift won't help */
+          this.x = x; this.y = y;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /* Sky drop near sx: first column with ground visible from above (never
+     inside rock, never over the void). Catches void/high spawns. */
+  placeSkyDrop(sx) {
+    const map = this.sim.map;
+    const offs = [0];
+    for (const r of [48, 128, 256, 512, 1024, 2048]) offs.push(-r, r);
+    for (const dx of offs) {
+      const cx = clamp(sx + dx, 8, map.w - 8);
+      const g = map.groundBelow(cx, 0, map.h + 100);
+      if (!g) continue;
+      const x = clamp(cx - this.w / 2, 0, map.w - this.w);
+      for (let lift = 0; lift <= 64; lift += 8) {
+        const y = g.y - this.h - lift;
+        if (y < 0) break;
+        if (map.rectHitsWorld(x, y, this.w, this.h)) continue;
+        this.x = x; this.y = y;
+        return true;
+      }
+    }
+    return false;
+  }
+
   respawn(first) {
-    const sp = this.sim.map.objects.filter(o => o.name.startsWith("sp_p") || o.name.startsWith("ctf_sp"));
-    const s = pick(sp.length ? sp : this.sim.map.objects);
-    this.x = s.x - this.w / 2; this.y = s.y - this.h;
-    /* de-embed from floating geometry (cave ceilings etc.) */
-    let tries = 0;
-    while (this.sim.map.rectHitsWorld(this.x, this.y, this.w, this.h) && tries++ < 64) {
-      this.y -= 8;
-      if (tries % 16 === 0) this.x = clamp(this.x + rnd(-96, 96), 0, this.sim.map.w - this.w);
+    const map = this.sim.map;
+    const sp = map.objects.filter(o => o.name.startsWith("sp_p") || o.name.startsWith("ctf_sp"));
+    /* maps with no spawn objects (training) fall back to a top-center drop */
+    const pool = sp.length ? sp : [{ x: map.w / 2, y: 80 }];
+    /* Authored pools often have points 64px apart — a pure random pick stacks
+       respawners into one blob. Pick the spawn FARTHEST from every living
+       soldier (random tiebreak keeps respawn points unpredictable). */
+    const pickSpawn = () => {
+      const live = this.sim.players.filter(p => p !== this && !p.dead && !p.ghost);
+      if (!live.length) return pick(pool);
+      let best = null, bestD = -1;
+      for (const s of pool) {
+        let d = Infinity;
+        for (const p of live) d = Math.min(d, Math.hypot(p.cx() - s.x, p.cy() - s.y));
+        d += Math.random() * 220;   /* tiebreak: near-equal spawns stay random */
+        if (d > bestD) { bestD = d; best = s; }
+      }
+      return best;
+    };
+    let placed = false;
+    for (let t = 0; t < 8 && !placed; t++) { const s = pickSpawn(); placed = this.placeNear(s.x, s.y); }
+    if (!placed) { const s = pickSpawn(); placed = this.placeSkyDrop(s.x); }
+    if (!placed) {
+      /* last resort: legacy walk-up de-embed from a random candidate */
+      const s = pick(pool);
+      this.x = clamp(s.x - this.w / 2, 0, map.w - this.w); this.y = s.y - this.h;
+      let tries = 0;
+      while (map.rectHitsWorld(this.x, this.y, this.w, this.h) && tries++ < 64) {
+        this.y -= 8;
+        if (tries % 16 === 0) this.x = clamp(this.x + rnd(-96, 96), 0, map.w - this.w);
+      }
     }
     this.vx = 0; this.vy = 0; this.hp = 100; this.fuel = 100; this.dead = false;
     this.invuln = first ? 1.5 : 2.0; this.nades = 2; this.shieldT = 0; this.recoilT = 0;
@@ -84,8 +175,11 @@ export class Soldier {
 
   muzzle() {
     const gw = (this.sim.frameSize(this.weapon.sprite).w || 60) * SPR;
+    const k = this.metrics();
     const reach = gw * 0.72 + 6;   /* grip-anchored barrel tip, matches the drawn gun */
-    return { x: this.cx() + Math.cos(this.aim) * reach, y: this.shoulderY() + Math.sin(this.aim) * reach };
+    /* pivot sits at the rear shoulder edge (opposite the facing), like the view */
+    const px = this.cx() + this.facing * k.shoulderDx;
+    return { x: px + Math.cos(this.aim) * reach, y: this.shoulderY() + Math.sin(this.aim) * reach };
   }
   cx() { return this.x + this.w / 2; }
   cy() { return this.y + this.h / 2; }
@@ -93,10 +187,12 @@ export class Soldier {
   metrics() {
     const leg = (this.sim.frameSize(this.skin.leg).h || 84) * SPR;
     const body = (this.sim.frameSize(this.skin.body).h || 102) * SPR;
+    const bodyW = (this.sim.frameSize(this.skin.body).w || 56) * SPR;
     return { leg, body,
       hip: leg - 5,
       neck: leg - 5 + body - 7,
-      shoulder: leg - 5 + body * 0.28 };
+      shoulder: leg - 5 + body * 0.28,
+      shoulderDx: -bodyW * 0.35 };   /* horizontal: behind center, negated by facing */
   }
   shoulderY() { const k = this.metrics(); return this.y + this.h - k.shoulder; }
 
@@ -231,23 +327,24 @@ export class Soldier {
       if (this.reloading <= 0) { this.ammo = this.weapon.mag; this.reloading = 0; }
     }
     this.flaming = !!(this.weapon.flame && input && input.fire && !this.dead && this.reloading <= 0);
+    this._lastInp = input || {};
 
-    const accel = this.grounded ? 2600 : 1500;
+    const accel = this.grounded ? 2100 : 1200;
     if (input.left) this.vx -= accel * dt;
     if (input.right) this.vx += accel * dt;
-    this.vx = clamp(this.vx, -460, 460);
+    this.vx = clamp(this.vx, -380, 380);
     if (!input.left && !input.right) this.vx *= Math.pow(this.grounded ? 0.0002 : 0.2, dt);
 
     let thrusting = false;
     if (input.jet && this.fuel > 0) {
-      this.vy -= 2600 * dt;
+      this.vy -= 2100 * dt;
       this.fuel = Math.max(0, this.fuel - 30 * dt);
       thrusting = true;
       if (Math.random() < 0.6) this.sim.ev("smoke", { x: this.cx() - this.facing * 10, y: this.y + this.h * 0.75 });
     }
     this.jetOn = thrusting;
     this.vy += GRAV * dt;
-    this.vy = clamp(this.vy, -900, 1250);
+    this.vy = clamp(this.vy, -750, 1250);
     if (this.grounded && !thrusting) this.fuel = Math.min(100, this.fuel + 26 * dt);
     for (const o of map.objects) if (o.name.startsWith("fp_b") && Math.abs(o.x - this.cx()) < 70 && Math.abs(o.y - this.y - this.h) < 90) this.fuel = Math.min(100, this.fuel + 55 * dt);
 
@@ -280,6 +377,28 @@ export class Soldier {
     if (this.grounded) {
       if (!wasGrounded && fallV > 500) this.sim.ev("sfx", { n: "boots", vol: 0.25 });
       this.vy = 0;
+    }
+    /* small-step climbing: grounded + pushing into a low step (rock ledges,
+       decor piles, grassy stair nubs) lifts the soldier onto it instead of
+       pinning — tall walls (no landing within reach) still block */
+    if (this.grounded) {
+      const li = this._lastInp || {};
+      const dir = li.right ? 1 : (li.left ? -1 : 0);
+      const pushing = dir !== 0 && Math.abs(this.vx) > 200;
+      const matterVx = Math.abs(this.body.velocity.x) * 60;
+      if (pushing && matterVx < 80) {
+        for (const h of [36, 28, 20, 12]) {
+          const ny = this.y - h;
+          if (ny < 0) continue;
+          if (this.sim.map.rectHitsWorld(this.x, ny, this.w, this.h)) continue;        /* headroom */
+          /* landing: ground under the lifted FRONT foot (the step top ahead) */
+          const lx = dir > 0 ? this.x + this.w / 2 : this.x - 16;
+          if (!this.sim.map.rectHitsWorld(lx, ny + this.h, this.w / 2 + 16, 10)) continue;
+          this.y = ny;
+          Matter.Body.setPosition(this.body, { x: this.x + this.w / 2, y: this.y + this.h / 2 });
+          break;
+        }
+      }
     }
     if (!Number.isFinite(this.x + this.y)) this.respawn();
     if (this.y > this.sim.map.h + 300) { this.hp = 0; this.die(null); }

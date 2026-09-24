@@ -45,6 +45,20 @@ export class MMRoom extends Room {
       const p = this.sim.getPlayer(client.sessionId);
       if (p) p.reload();
     });
+    /* e2e-only teleport (MM_DEBUG=1): deterministic kill geometry for
+       room_test — never enabled in production. */
+    if (process.env.MM_DEBUG) {
+      this.onMessage("dbgTeleport", (client, d) => {
+        const p = this.sim.getPlayer(client.sessionId);
+        if (!p || !d) return;
+        const x = Number(d.x), y = Number(d.y);
+        if (!Number.isFinite(x + y)) return;
+        p.x = Math.min(Math.max(x, 0), this.sim.map.w - p.w);
+        p.y = Math.min(Math.max(y, 0), this.sim.map.h - p.h);
+        p.vx = 0; p.vy = 0;
+        p.ensureBody(true);
+      });
+    }
 
     this._last = Date.now();
     this.setPatchRate(PATCH);

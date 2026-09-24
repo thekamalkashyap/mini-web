@@ -6,6 +6,7 @@ import { useStore } from "./store.js";
 import Lobby from "./ui/Lobby.jsx";
 import Hud from "./ui/Hud.jsx";
 import { createGame } from "./game/boot.js";
+import { parseSoloSearch } from "./soloLink.js";
 
 function GameMount({ opts }) {
   const containerRef = useRef(null);
@@ -39,15 +40,8 @@ export default function App() {
 
   /* deep links: ?solo=<map>[&demo][&flashhold][&colliders][&bots][&zoom=N] */
   useEffect(() => {
-    const qp = new URLSearchParams(location.search);
-    if (qp.has("solo")) {
-      startGame({
-        mode: "solo", map: qp.get("solo") || "1outpost",
-        demo: qp.has("demo"), flashHold: qp.has("flashhold"),
-        colliders: qp.has("colliders"), bots: qp.has("bots"),
-        zoom: parseFloat(qp.get("zoom")) || 0,
-      });
-    }
+    const deep = parseSoloSearch(location.search);
+    if (deep) startGame(deep);
   }, [startGame]);
 
   if (screen === "game" || screen === "loading") return <GameMount key={gameOpts && gameOpts.startKey || 0} opts={gameOpts} />;

@@ -25,11 +25,11 @@ function makeSim(mapName, bots = 2) {
 }
 const stepN = (sim, n, dt = 1 / 60) => { for (let i = 0; i < n; i++) sim.step(dt); };
 
-/* nearest free 44x104 soldier box around (cx, cy), or null */
+/* nearest free 44x84 soldier box around (cx, cy), or null */
 function findClear(sim, cx, cy, rx = 300, ry = 300) {
   for (let dy = 0; dy <= ry; dy += 15) for (const sy of dy ? [cy - dy, cy + dy] : [cy])
     for (let dx = 0; dx <= rx; dx += 10) for (const sx of dx ? [cx - dx, cx + dx] : [cx])
-      if (!sim.map.rectHitsWorld(sx - 22, sy - 52, 44, 104) && sy > 50 && sy < sim.map.h - 50) return [sx, sy];
+      if (!sim.map.rectHitsWorld(sx - 22, sy - 42, 44, 84) && sy > 50 && sy < sim.map.h - 50) return [sx, sy];
   return null;
 }
 /* free spot strictly 60..260px to the RIGHT of cx with a CLEAR firing corridor
@@ -37,7 +37,7 @@ function findClear(sim, cx, cy, rx = 300, ry = 300) {
    pillar between them (learned the hard way: 40 bullets, 0 hits) */
 function findClearRight(sim, cx, cy) {
   for (let dx = 60; dx <= 260; dx += 10) for (let dy = 0; dy <= 90; dy += 15) for (const sy of dy ? [cy - dy, cy + dy] : [cy]) {
-    if (sim.map.rectHitsWorld(cx + dx - 22, sy - 52, 44, 104)) continue;          /* victim box */
+    if (sim.map.rectHitsWorld(cx + dx - 22, sy - 42, 44, 84)) continue;          /* victim box */
     if (sim.map.rectHitsWorld(cx + 24, sy - 40, dx - 24, 70)) continue;          /* bullet corridor */
     if (sy > 50 && sy < sim.map.h - 50) return [cx + dx, sy];
   }
@@ -119,6 +119,18 @@ function pin(s, cx, cy) { s.x = cx - s.w / 2; s.y = cy - s.h / 2; s.vx = 0; s.vy
   }
   if (moved < 30) fail("player never moves on left input"); else pass("player moves");
 
+  /* tuned feel: capped run speed + climb rate (slower than legacy 460/900) */
+  pin(sim.me, meSpot[0], meSpot[1]);
+  sim.me.input = { left: false, right: true, jet: false, fire: false };
+  for (let f = 0; f < 60; f++) { if (f % 20 === 0) pin(sim.me, meSpot[0], meSpot[1]); sim.step(1 / 60); }
+  if (Math.abs(sim.me.vx - 380) > 5) fail(`run speed ${sim.me.vx.toFixed(0)} != 380`); else pass("run speed caps at 380");
+  pin(sim.me, meSpot[0], meSpot[1]);
+  sim.me.fuel = 100;
+  sim.me.input = { left: false, right: false, jet: true, fire: false };
+  for (let f = 0; f < 90; f++) sim.step(1 / 60);   /* no re-pin: it zeroes vy mid-climb; jetting up can't void */
+  if (Math.abs(sim.me.vy + 750) > 5) fail(`climb rate ${sim.me.vy.toFixed(0)} != -750`); else pass("jet climb caps at -750");
+  sim.me.input = null;
+
   /* jetpack + fuel: clear spot away from fp_b fuel stations (their 55/s regen
      outpaces the 30/s jet drain) */
   const stations = sim.map.objects.filter(o => o.name.startsWith("fp_b"));
@@ -136,24 +148,63 @@ function pin(s, cx, cy) { s.x = cx - s.w / 2; s.y = cy - s.h / 2; s.vx = 0; s.vy
   if (sim.me.fuel >= 100) fail("fuel never drains"); else pass("fuel drains");
   sim.me.input = null;
 
-  /* pickup grab: first pad WITH a reachable free spot (real mask => reachable),
-     re-pinned every step — tests the overlap->grab mechanic itself */
-  let pk = null, hold = null;
-  for (const cand of sim.pickups) {
-    if (cand.respawn > 0) continue;
-    outer: for (let dy = -45; dy <= 45; dy += 15) for (let dx = -40; dx <= 40; dx += 10) {
+  /* pickup grab: guns/nades need an E press (overlap alone must not swap
+     your weapon); instant items still auto-grab. Re-pinned every step.
+     Bots auto-grab and roam free — park them far away, un-botted, so they
+     can neither steal the pads mid-check nor have stolen them earlier. */
+  for (const q of sim.players) {
+    if (q === sim.me || !q.isBot) continue;
+    q.isBot = false; q.input = {};
+    pin(q, 60 + (sim.players.indexOf(q) * 50), 200);
+  }
+  const holdNear = cand => {
+    for (let dy = -45; dy <= 45; dy += 15) for (let dx = -40; dx <= 40; dx += 10) {
       const cx = cand.x + dx, cy = cand.y + dy;
-      if (!sim.map.rectHitsWorld(cx - 22, cy - 52, 44, 104)) { pk = cand; hold = [cx, cy]; break outer; }
+      if (!sim.map.rectHitsWorld(cx - 22, cy - 42, 44, 84)) return [cx, cy];
     }
-    if (pk) break;
+    return null;
+  };
+  let wpk = null, whold = null;   /* gun pad (m61 excluded — me spawns with it) */
+  for (const cand of sim.pickups) {
+    if (cand.list.includes("m61")) continue;
+    if (!cand.list.some(id => WEAPONS[id] && !WEAPONS[id].item)) continue;
+    const h = holdNear(cand);
+    if (h) { wpk = cand; whold = h; break; }
   }
-  if (!pk) { pk = sim.pickups[0]; hold = [pk.x, pk.y]; }
-  for (let f = 0; f < 24 && pk.respawn <= 0; f++) {
-    pin(sim.me, hold[0], hold[1]);
-    sim.step(1 / 60);
+  if (wpk) wpk.respawn = 0;
+  if (!wpk) fail("no reachable gun pad on outpost (test geometry)");
+  else {
+    wpk.idx = wpk.list.findIndex(id => WEAPONS[id] && !WEAPONS[id].item);
+    const wantId = wpk.list[wpk.idx];
+    sim.me.input = { left: false, right: false, jet: false, fire: false, use: false };
+    for (let f = 0; f < 20; f++) { pin(sim.me, whold[0], whold[1]); sim.step(1 / 60); }
+    if (wpk.respawn > 0 || sim.me.weaponId !== "m61") fail("gun auto-grabbed without E");
+    else pass("gun ignored without E press");
+    if (!sim.pickupNear(sim.me)) fail("pickupNear misses the gun pad (no prompt)");
+    else pass("pickupNear finds the gun pad (prompt)");
+    sim.me.input.use = true;
+    for (let f = 0; f < 4 && wpk.respawn <= 0; f++) { pin(sim.me, whold[0], whold[1]); sim.step(1 / 60); }
+    sim.me.input.use = false;
+    if (wpk.respawn <= 0) fail("E press never grabbed the gun");
+    else if (sim.me.weaponId !== wantId) fail(`E grabbed ${sim.me.weaponId}, wanted ${wantId}`);
+    else pass("E press grabs the gun");
   }
-  if (pk.respawn <= 0) fail("pickup not consumed on overlap"); else pass("pickup consumed on overlap");
   if (!sim.events.some(e => e.t === "pk")) fail("pk event never emitted"); else pass("pk events emitted");
+  /* instant item: health still auto-grabs on overlap */
+  const hpk = sim.pickups.find(k => k.list.includes("healthpack"));
+  const hhold = hpk && holdNear(hpk);
+  if (!hpk || !hhold) fail("no reachable health pad on outpost (test geometry)");
+  else {
+    hpk.idx = hpk.list.indexOf("healthpack");
+    hpk.respawn = 0;
+    sim.me.hp = 40;
+    sim.me.input = { left: false, right: false, jet: false, fire: false, use: false };
+    for (let f = 0; f < 20 && hpk.respawn <= 0; f++) { pin(sim.me, hhold[0], hhold[1]); sim.step(1 / 60); }
+    if (hpk.respawn <= 0 || sim.me.hp !== 100) fail("health did not auto-grab on overlap");
+    else pass("health auto-grabs on overlap");
+  }
+  sim.me.input = null;
+  for (const q of sim.players) if (q !== sim.me && q.ai) { q.isBot = true; q.input = null; }
 
   /* combat: pin a 5hp victim 60px right of me in clear air, aim right, burst */
   const victim = sim.players[2];
@@ -228,6 +279,39 @@ function pin(s, cx, cy) { s.x = cx - s.w / 2; s.y = cy - s.h / 2; s.vx = 0; s.vy
   stepN(sim, 120);
   if (!(sim.map.w > 4000 && sim.pickups.length > 10)) fail("lunarcy map failed to load"); else pass("lunarcy loads");
   if (!sim.players.every(p => Number.isFinite(p.x))) fail("lunarcy produced NaN positions"); else pass("lunarcy stable");
+}
+
+/* ---------- step-up: a 24px ledge must not pin a walking soldier ----------
+   Synthetic micro-map (deterministic): flat floor y=150 left of x=400,
+   raised floor y=126 right of it. Without step-up the 44x84 box wedges at
+   x=356; with it the soldier climbs onto the ledge and walks past. */
+{
+  const step = 2, cols = 400, rows = 100;
+  const mask = new Uint8Array(cols * rows);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (r * step >= (c * step < 400 ? 150 : 126)) mask[r * cols + c] = 1;
+  }
+  const json = { w: 10, h: 10, tileW: 80, tileH: 20, tilesets: [], layers: [{ name: "tile", data: new Array(100).fill(0) }], objects: [] };
+  const sim = new WorldSim({ mapJson: json, maskData: { mask, step, cols }, frameSize: () => ({ w: 60, h: 40 }), mode: "solo" });
+  const p = sim.addPlayer({ id: "st", name: "ST" });
+  p.x = 320; p.y = 150 - p.h; p.vx = 0; p.vy = 0; p.invuln = 999;
+  p.ensureBody(true);
+  p.input = { left: false, right: true, jet: false, fire: false, aimX: p.cx() + 300, aimY: p.cy() };
+  stepN(sim, 240);
+  if (p.dead) fail("step-up probe died on flat ground");
+  else if (p.x < 420) fail(`pinned by the 24px step (x=${Math.round(p.x)})`);
+  else if (p.y > 56) fail(`past the step but not on the ledge (y=${Math.round(p.y)})`);
+  else pass(`step-up climbs the ledge (x=${Math.round(p.x)}, y=${Math.round(p.y)})`);
+  /* tall walls still block: same probe against a 200px wall must not tunnel */
+  for (let r = 0; r < rows; r++) for (let c = 200; c < cols; c++) mask[r * cols + c] = 1;
+  const sim2 = new WorldSim({ mapJson: json, maskData: { mask, step, cols }, frameSize: () => ({ w: 60, h: 40 }), mode: "solo" });
+  const q = sim2.addPlayer({ id: "st2", name: "ST2" });
+  q.x = 320; q.y = 150 - q.h; q.vx = 0; q.vy = 0; q.invuln = 999;
+  q.ensureBody(true);
+  q.input = { left: false, right: true, jet: false, fire: false, aimX: q.cx() + 300, aimY: q.cy() };
+  stepN(sim2, 240);
+  if (q.x > 360) fail(`step-up tunneled a tall wall (x=${Math.round(q.x)})`);
+  else pass("tall wall still blocks");
 }
 
 console.log(errors ? `\nSIM TEST FAILED (${errors})` : "\nSIM TEST PASSED");
