@@ -8,7 +8,6 @@
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
-    "masks": "node scripts/build-masks.mjs",
     "test": "node test/sim_test.js && node test/room_test.js"
   },
   "dependencies": {

@@ -1,78 +1,51 @@
-# Mini Militia Classic — Web Port (PoC)
+# Mini Militia Web
 
-A browser remake of the Outpost map from Mini Militia Classic, built entirely
-from assets reverse-engineered out of the original APK (`com.appsomniacs.mmc` v0.14.4).
+A personal/educational browser port of Mini Militia Classic, built from assets
+reverse-engineered out of the official APK (see `context.md`). Not for
+redistribution — assets © Appsomniacs/Miniclip.
 
-**Personal / educational project.** All art, sounds, maps and the game itself are
-© Appsomniacs / Miniclip — do not publish or distribute this build.
+## Stack
 
-## Run it
+- **Frontend:** React + Vite + **Phaser 3** (tilemap rendering via a Tiled
+  adapter, cocos-plist atlas conversion, matter.js collision through the
+  shared sim)
+- **Backend:** **Colyseus** authoritative rooms (60 Hz simulation, 20 Hz state
+  sync, batched event broadcasts)
+- **One shared simulation** (`shared/`) runs identically inside the Colyseus
+  room (authority) and the browser (solo mode + client-side prediction)
+- Alpha-traced 2px collision masks are built from the same tile pixels on both
+  sides (pngjs on the server, canvas in the browser) — server collision always
+  matches the art.
+
+## Run
+
 ```bash
-cd ~/mm_web
-python3 -m http.server 8080          # serve the client
-# open http://localhost:8080 (termux-open-url http://localhost:8080)
+npm install
+npm run server     # Colyseus on ws://localhost:2567
+npm run dev        # game on http://localhost:5173
 ```
-Click/tap once to arm audio. Pick a **map** (all 24 from the APK), then:
 
-- **SOLO vs BOTS** — instant deathmatch with 2 bot soldiers
-- **HOST ONLINE** — start a room on your relay server, share the URL
-- **JOIN** — enter a friend's `ws://IP:8090` and jump in
-
-### Multiplayer server
-```bash
-cd ~/mm_web/server
-node server.js 8090        # or: PORT=8090 node server.js
-```
-First client in a room becomes **host** (authoritative sim); others are guests
-streaming inputs at 30 Hz and receiving 20 Hz snapshots + events. Host migration
-is handled by the relay if the host drops. Rooms are keyed by map name.
+- **Solo:** pick a map → SOLO PRACTICE (optionally spawn bots)
+- **Online:** enter name + server URL → PLAY ONLINE (authoritative server;
+  local prediction keeps input responsive)
+- **Debug deep links:** `/?solo=1outpost&colliders&bots&zoom=2` — also
+  `&demo` (auto-fire), `&flashhold` (pin muzzle flash). Runtime toggles:
+  `` ` `` colliders, `M` mute.
 
 ## Controls
-| Action | Desktop | Touch |
-|---|---|---|
-| Move | A / D | left-half stick |
-| Jetpack | W or Space (hold, drains fuel) | left stick up |
-| Aim / fire | mouse + LMB | right-half stick |
-| Grenade | G | — |
-| Reload | R | auto |
-| Scope (M93BA) | RMB hold | — |
-| Mute | M | — |
 
-## What's real (extracted from the APK)
-- **Map** — Outpost TMX converted to JSON: tile geometry, both tile layers,
-  every weapon spawn (`wp_p_*` with its exact weapon lists), spawn points,
-  fuel/flag stations, palm/bush decor — at original coordinates.
-- **Sprites** — the game's own atlas (`menuTexture.png`, 331 frames): the actual
-  soldier parts, all 30+ weapons with muzzle flashes, pickups, flags, decor.
-- **Sounds** — all 111 WAVs carved from the `da2sound16.ckb` CocosDenshion bank
-  (per-gun fire sounds, reloads, ricochets, explosions, the death voice lines).
-- **Weapon behaviour** — roster, mag sizes, fire rates approximated from the
-  original's feel; rocket/grenade splash, flamethrower, laser beam, melee.
+WASD move · W jetpack · mouse aim · LMB fire · G nade · R reload · RMB scope
 
-## What's reimplemented (gameplay was C++ inside `libcocos2dcpp.so`)
-- Jetpack physics (thrust/fuel/regen), tile collision, camera + shake + parallax
-- Bullet/rocket/grenade simulation, explosions, blood/smoke/spark particles
-- Weapon pickups that cycle the map's real loadout lists, med/boost/shield items
-- 2 bots with jetpack AI (they can and will fall off Outpost — just like the real thing)
+## Tests
 
-## Structure
-```
-index.html          entry
-js/main.js          engine: loop, physics, soldiers, bots, HUD
-js/weapons.js       weapon definitions (ids = TMX pickup ids)
-js/map.js           TMX map + Cocos2d atlas renderers
-js/audio.js         WebAudio loader for carved wavs
-data/maps/*.json    24 converted maps (only 1outpost is wired in)
-data/atlas/*.json   plist-atlas frame tables
-img/                spritesheets, tilesets, fx
-audio/*.wav         111 carved sounds
-../mm_analysis/pipeline/extract.py   the asset pipeline
-test/solo_test.js   headless solo smoke test (node test/solo_test.js)
-test/e2e_test.js    full MP test: real server + host + guest over WebSockets
+```bash
+npm test    # headless sim regression (physics/bots/pickups/combat/death/void)
+            # + real-server e2e (join, input, movement, fire/death events, leave)
 ```
 
-## Try other maps
-Every map from the APK is already converted in `data/maps/`. In `js/main.js`
-`boot()` swap `1outpost.json` for e.g. `7lunarcy`, `9snowblind`, `20deadlock`.
-Maps that use desert/moon/snow tilesets need their `t64*_new.tsx` image copied
-from the APK (already in `img/` — the renderer picks tilesets by firstgid).
+## Layout
+
+`src/` client · `shared/` simulation (no DOM deps) · `server/` Colyseus ·
+`data|img|audio` extracted assets (generated by `../mm_analysis` pipeline —
+do not hand-edit) · `test/` headless suites. See `AGENT.md` for the working
+guide and golden rules.

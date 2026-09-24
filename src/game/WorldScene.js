@@ -183,11 +183,9 @@ export class WorldScene extends Phaser.Scene {
 
   /* ================================================================ loop */
   update(time, deltaMs) {
-    if (typeof window !== "undefined") { window.__updCount = (window.__updCount || 0) + 1; }
     try {
     this.updateInner(time, deltaMs);
     } catch (e) {
-      if (typeof window !== "undefined") { window.__updErr = (window.__updErr || "") + "|" + (e && e.message); }
       console.error("world update failed", e);
     }
   }
