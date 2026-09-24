@@ -12,10 +12,11 @@
     "test": "node test/sim_test.js && node test/room_test.js"
   },
   "dependencies": {
-    "@colyseus/core": "^0.18.16",
-    "@colyseus/schema": "^5.0.34",
-    "@colyseus/ws-transport": "^0.18.3",
+    "@colyseus/core": "^0.16.26",
+    "@colyseus/schema": "^3.0.76",
+    "@colyseus/ws-transport": "^0.16.5",
     "colyseus.js": "^0.16.22",
+    "express": "^5.2.1",
     "matter-js": "^0.20.0",
     "phaser": "^3.90.0",
     "pngjs": "^7.0.0",
