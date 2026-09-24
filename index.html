@@ -1,74 +1,18 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="description" content="Browser port of Mini Militia Classic — solo vs bots and online multiplayer.">
-<meta name="theme-color" content="#0b0e14">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🎯</text></svg>">
-<title>Mini Militia Classic — Web</title>
-<style>
-  html,body{margin:0;padding:0;background:#0b0e14;overflow:hidden;height:100%;
-    font-family:'Trebuchet MS',sans-serif;-webkit-user-select:none;user-select:none;touch-action:none}
-  canvas{display:block}
-  #load{position:fixed;inset:0;background:#0b0e14;color:#9fb4c8;display:flex;flex-direction:column;
-    align-items:center;justify-content:center;z-index:20;transition:opacity .4s}
-  #load h1{color:#e8f0f8;font-size:22px;letter-spacing:4px;margin:0 0 6px}
-  #load h2{color:#5b7186;font-size:12px;letter-spacing:6px;margin:0 0 30px;font-weight:normal}
-  #bar{width:280px;height:4px;background:#1c2531;border-radius:2px;overflow:hidden}
-  #fill{height:100%;width:0;background:#7ec3f0;transition:width .15s}
-  #load .tip{margin-top:22px;font-size:11px;color:#42556b;letter-spacing:1px}
-
-  #lobby{position:fixed;inset:0;background:radial-gradient(ellipse at 50% 30%,#141b28 0%,#0b0e14 70%);
-    display:none;flex-direction:column;align-items:center;justify-content:center;z-index:10;color:#cfe2f3}
-  #lobby h1{color:#e8f0f8;font-size:26px;letter-spacing:6px;margin:0 0 2px;text-align:center}
-  #lobby h2{color:#5b7186;font-size:11px;letter-spacing:8px;margin:0 0 34px;font-weight:normal}
-  .row{display:flex;gap:10px;margin:8px 0;align-items:center;flex-wrap:wrap;justify-content:center}
-  label{font-size:10px;letter-spacing:2px;color:#5b7186;width:70px;text-align:right}
-  input,select{background:#141b26;border:1px solid #2a3a50;color:#e8f0f8;border-radius:4px;
-    padding:9px 12px;font-size:14px;font-family:inherit;outline:none;width:190px}
-  input:focus,select:focus{border-color:#7ec3f0}
-  button{background:#1d2c40;border:1px solid #33507a;color:#e8f0f8;border-radius:4px;padding:11px 22px;
-    font-size:13px;letter-spacing:2px;font-family:inherit;cursor:pointer;transition:.15s}
-  button:hover{background:#2a4068;border-color:#7ec3f0;color:#ffd76e}
-  button:active{transform:scale(.97)}
-  #btnSolo{border-color:#4a7d54}#btnSolo:hover{background:#1e3a26;border-color:#6fdc7a}
-  #btnHost{border-color:#8a6d2f}#btnHost:hover{background:#3a2e14;border-color:#ffd76e}
-  #netstat{font-size:10px;color:#5b7186;margin-top:18px;letter-spacing:1px;height:14px}
-  .big{display:flex;gap:16px;margin-top:26px}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Mini Militia Web</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #root { width: 100%; height: 100%; overflow: hidden; background: #0d1420; }
+    body { font-family: Trebuchet MS, Verdana, sans-serif; color: #cfe2f3; }
+    #game-container canvas { display: block; }
+  </style>
 </head>
 <body>
-<canvas id="game"></canvas>
-
-<div id="lobby">
-  <h1>MINI MILITIA</h1>
-  <h2>CLASSIC · WEB</h2>
-  <div class="row"><label>CALLSIGN</label><input id="pname" maxlength="14" spellcheck="false"></div>
-  <div class="row"><label>MAP</label><select id="mapsel"></select></div>
-  <div class="big">
-    <button id="btnSolo">▶ SOLO vs BOTS</button>
-    <button id="btnHost">⚑ HOST ONLINE</button>
-  </div>
-  <div class="row" style="margin-top:22px">
-    <label>SERVER</label><input id="url" spellcheck="false" placeholder="ws://192.168.x.x:8090">
-    <button id="btnJoin">➤ JOIN</button>
-  </div>
-  <div id="netstat"></div>
-</div>
-
-<div id="load">
-  <h1>MINI MILITIA · CLASSIC</h1>
-  <h2>WEB PORT</h2>
-  <div id="bar"><div id="fill"></div></div>
-  <div class="tip" id="status">loading…</div>
-</div>
-
-<script src="js/audio.js"></script>
-<script src="js/vendor/matter.min.js"></script>
-<script src="js/weapons.js"></script>
-<script src="js/net.js"></script>
-<script src="js/map.js"></script>
-<script src="js/main.js"></script>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>
