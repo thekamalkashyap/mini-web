@@ -3,7 +3,7 @@
 import React from "react";
 import { useStore } from "../store.js";
 
-const LEGEND = [["#3cdc78", "terrain"], ["#ff3b30", "surface"], ["#c85ae6", "boundary"], ["#ff8c28", "soldier"], ["#ffd732", "nade"]];
+const LEGEND = [["#3cdc78", "terrain"], ["#ff3b30", "surface"], ["#c85ae6", "boundary"], ["#ff8c28", "soldier"], ["#ffd732", "nade"], ["#28d8ff", "gun axis"]];
 
 export default function Hud() {
   const hud = useStore(s => s.hud);
