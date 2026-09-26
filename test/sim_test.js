@@ -11,6 +11,7 @@
 import { loadMapBundle } from "../server/assets.js";
 import { WorldSim } from "../shared/sim.js";
 import { WEAPONS } from "../shared/weapons.js";
+import { EMP } from "../shared/config/tuning.js";
 
 let errors = 0;
 const fail = m => { console.error("FAIL:", m); errors++; };
@@ -147,6 +148,84 @@ function pin(s, cx, cy) { s.x = cx - s.w / 2; s.y = cy - s.h / 2; s.vx = 0; s.vy
   if (sim.me.y > y0 - 10) fail("jetpack never lifts"); else pass("jetpack lifts");
   if (sim.me.fuel >= 100) fail("fuel never drains"); else pass("fuel drains");
   sim.me.input = null;
+
+  /* EMP rifle: orb rounds (not plain tracers) ground the victim's jetpack
+     for EMP.DISABLE_T; plain bullets never set empT (control). Pinned
+     100px apart in clear air — 0.02 spread drifts ~2px, always inside. */
+  const vic = sim.addPlayer({ id: "empvic", name: "VIC" });
+  for (const q of sim.players) {
+    if (q === sim.me || q === vic || !q.isBot) continue;
+    q.isBot = false; q.input = {};
+    pin(q, 60 + (sim.players.indexOf(q) * 50), 200);
+  }
+  if (sim.me.dead) { sim.me.dead = false; sim.me.deadT = 0; }
+  let duel = null;
+  for (let y = 300; y < sim.map.h - 200 && !duel; y += 128)
+    for (let x = 200; x < sim.map.w - 300 && !duel; x += 128) {
+      const s = findClear(sim, x, y, 60, 60);
+      if (!s) continue;
+      const l = findClearRight(sim, s[0], s[1]);
+      if (l) duel = [s, l];
+    }
+  if (!duel) fail("no EMP duel lane on map");
+  const [dBase, lane] = duel || [[meSpot[0], meSpot[1]], [meSpot[0] + 100, meSpot[1]]];
+  pin(sim.me, dBase[0], dBase[1]);
+  pin(vic, lane[0], lane[1]);
+  sim.me.invuln = 999; vic.invuln = 0;
+  sim.me.equip(WEAPONS.emp, true);
+  sim.me.reloading = 0; sim.me.shootT = 0;
+  sim.me.input = { left: false, right: false, jet: false, fire: true, aimX: vic.cx(), aimY: vic.cy() };
+  const fires0 = sim.events.filter(e => e.t === "fire").length;
+  for (let f = 0; f < 200 && vic.empT <= 0; f++) {
+    if (vic.dead) { vic.dead = false; vic.deadT = 0; vic.invuln = 0; }
+    pin(sim.me, dBase[0], dBase[1]);
+    pin(vic, lane[0], lane[1]);
+    sim.step(1 / 60);
+    sim.me.input.aimX = vic.cx(); sim.me.input.aimY = vic.cy();
+  }
+  /* orb-ness on the net-visible wire (point-blank rounds despawn same-step,
+     so live-bullet sampling misses them — the FIRE event persists) */
+  const orb = sim.events.slice(fires0).some(e => e.t === "fire" && e.emp);
+  sim.me.input = null;
+  if (!orb) fail("EMP rifle fires plain bullets, not orbs");
+  else if (vic.empT !== EMP.DISABLE_T) fail(`EMP hit sets empT=${vic.empT}, want ${EMP.DISABLE_T}`);
+  else pass(`EMP orb grounds victim (${EMP.DISABLE_T}s)`);
+  pin(vic, lane[0], lane[1]);
+  const vy0 = vic.vy, fuel0 = vic.fuel;
+  vic.input = { left: false, right: false, jet: true, fire: false };
+  for (let f = 0; f < 30; f++) {
+    pin(vic, lane[0], lane[1]);
+    sim.step(1 / 60);
+  }
+  vic.input = null;
+  if (vic.vy < vy0 - 1 || vic.fuel < fuel0) fail("jet thrust/fuel burn through EMP ground");
+  else pass("grounded jetpack holds (no thrust, no burn)");
+  const emp0 = vic.empT;
+  stepN(sim, 60);
+  if (!(vic.empT < emp0)) fail("empT never ticks down");
+  else pass("empT decays over time");
+  vic.empT = 0;
+  const vic2 = sim.addPlayer({ id: "empctl", name: "CTL" });
+  pin(vic2, lane[0], lane[1]);
+  vic2.invuln = 0;
+  const hp0 = vic2.hp;
+  sim.me.equip(WEAPONS.ak47, true);
+  sim.me.reloading = 0; sim.me.shootT = 0;
+  sim.me.input = { left: false, right: false, jet: false, fire: true, aimX: vic2.cx(), aimY: vic2.cy() };
+  for (let f = 0; f < 200 && vic2.hp >= hp0; f++) {
+    if (vic2.dead) { vic2.dead = false; vic2.deadT = 0; }
+    pin(sim.me, dBase[0], dBase[1]);
+    pin(vic2, lane[0], lane[1]);
+    sim.step(1 / 60);
+    sim.me.input.aimX = vic2.cx(); sim.me.input.aimY = vic2.cy();
+  }
+  sim.me.input = null;
+  if (vic2.hp >= hp0) fail("control shots never land");
+  else if (vic2.empT !== 0) fail("plain bullet sets empT");
+  else pass("plain bullets leave empT at 0");
+  sim.removePlayer("empvic"); sim.removePlayer("empctl");
+  sim.me.equip(WEAPONS.m61, true);
+  sim.me.reloading = 0; sim.me.shootT = 0;
 
   /* pickup grab: guns/nades need an E press (overlap alone must not swap
      your weapon); instant items still auto-grab. Re-pinned every step.

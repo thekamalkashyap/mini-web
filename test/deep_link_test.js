@@ -4,6 +4,7 @@
    on a blank page with no HUD. resolveMapId coerces to 1outpost up front. */
 import { MAPS, resolveMapId } from "../shared/constants.js";
 import { parseSoloSearch } from "../src/soloLink.js";
+import { parsePartySearch } from "../src/partyLink.js";
 
 let errors = 0;
 const fail = m => { console.error("FAIL:", m); errors++; };
@@ -62,6 +63,24 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     if (resolveMapId(bad) !== "1outpost") fail("resolveMapId(" + JSON.stringify(bad) + ") not fallback");
   }
   pass("resolveMapId edge inputs fall back");
+}
+
+/* ?room= invite links: id passes through, absence is null (lobby shows the
+   plain launch panel instead of auto-joining) */
+{
+  const cases = [
+    ["?room=K6mk3vZaS", "K6mk3vZaS", "plain invite"],
+    ["?room=%20K6mk3vZaS%20", "K6mk3vZaS", "padded id"],
+    ["?room=", null, "empty room"],
+    ["?room", null, "bare room"],
+    ["?bots", null, "unrelated query"],
+    ["", null, "empty query"],
+  ];
+  for (const [q, want, name] of cases) {
+    const got = parsePartySearch(q);
+    if (got !== want) fail(`${name}: got ${JSON.stringify(got)}`);
+    else pass(`${name} ok`);
+  }
 }
 
 console.log(errors ? `\nDEEP LINK TEST FAILED (${errors})` : "\nDEEP LINK TEST PASSED");

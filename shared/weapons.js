@@ -33,7 +33,7 @@ export const WEAPONS = {
     magFrame:"desertEagleMag.png" },
   aa12:        { name:"AA-12",      sprite:"aa12.png",       empty:"aa12E.png",  sfx:"shotgun", rpm:300, dmg:9,  pellets:5, speed:1300, mag:20, reload:2.6, spread:0.120, auto:true, kick:0.11,
     magFrame:"aa12Mag.png" },
-  emp:         { name:"EMP RIFLE",  sprite:"emp.png",        empty:"empE.png",   sfx:"energy",  rpm:300, dmg:14, pellets:1, speed:1500, mag:16, reload:2.0, spread:0.020, auto:true, kick:0.08,
+  emp:         { name:"EMP RIFLE",  sprite:"emp.png",        empty:"empE.png",   sfx:"energy",  rpm:300, dmg:14, pellets:1, speed:1500, mag:16, reload:2.0, spread:0.020, auto:true, kick:0.08, emp:true,
     magFrame:"empMag.png" },
   laser:       { name:"LASER",      sprite:"laser.png",      sfx:"laser",   rpm:240, dmg:16, pellets:1, speed:9999, mag:12, reload:2.0, spread:0.000, auto:false, beam:true, kick:0.06 },
   phasr:       { name:"PHASR",      sprite:"laser.png",      sfx:"energy",  rpm:340, dmg:12, pellets:1, speed:1800, mag:24, reload:1.8, spread:0.030, auto:true, kick:0.07,
@@ -60,3 +60,32 @@ export const NADES = {
 };
 
 export function fireSoundOf(w) { return w.sfx || "ak47"; }
+
+/* Pickup classification — one source for the sim's grab rules, the HUD
+   prompt and the tests. Guns and throwable nades swap inventory (need an E
+   press); health/fuel/shield apply instantly (auto-grab). */
+export function isGunPickup(id) {
+  return !!(WEAPONS[id] && !WEAPONS[id].item);
+}
+
+export function isNadePickup(id) {
+  return !WEAPONS[id] && !!NADES[id];
+}
+
+/* true for inventory swaps (gun/nade pads), false for instant items */
+export function isInventoryPickup(id) {
+  return isGunPickup(id) || isNadePickup(id);
+}
+
+export function pickupDisplayName(id) {
+  return (WEAPONS[id] && WEAPONS[id].name) || String(id).toUpperCase();
+}
+
+/* weapon lookup with the default-gun fallback (unknown schema ids / typos) */
+export function weaponById(id) {
+  return WEAPONS[id] || WEAPONS.m61;
+}
+
+export function weaponIdOf(w) {
+  return Object.keys(WEAPONS).find((k) => WEAPONS[k] === w) || "m61";
+}

@@ -1,22 +1,33 @@
-/* Terrain + avatar regression: slope skins, despiked grass, grounded spawns
-   and pickups, trim-correct avatar anchors, tight collider.
+/* Terrain + avatar regression: traced segment colliders, despiked grass,
+   grounded spawns and pickups, trim-correct avatar anchors, tight collider.
    Headless WorldSim on the real maps (server mask pipeline == browser). */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadMapBundle } from "../server/assets.js";
-import { GameMap, skinTopAt } from "../shared/map.js";
+import { GameMap } from "../shared/map.js";
 import { WorldSim } from "../shared/sim.js";
+import { SEGMENT_BUDGET, SIMPLIFY_TOL } from "../shared/collision/shapes.js";
+import { FLOOR_SMOOTH_NARROW, FLOOR_SMOOTH_TOOTH, FLOOR_SMOOTH_NOTCH_DEEP } from "../shared/collision/simplify.js";
 import { MAPS, partOrigin, SOLDIER_W, SOLDIER_H, LEG_LIFT } from "../shared/constants.js";
+/* §2 envelopes derive from the floor-smoother contract: teeth cut to TOOTH
+   outward, narrow cracks bridged to NOTCH_DEEP inward — PLUS the D-P
+   tolerance (the smoother gauges post-D-P vertices, and the true mask can
+   sit a further SIMPLIFY_TOL beyond them when both cuts align: observed
+   38-39px on capped tooth cuts) plus 4px grid/slack. A WIDE departure
+   still fails (lidded pit, buried hill). */
+const TRACK_OUT = FLOOR_SMOOTH_TOOTH + SIMPLIFY_TOL + 4;
+const TRACK_IN = FLOOR_SMOOTH_NOTCH_DEEP + SIMPLIFY_TOL + 4;
+const COV_NARROW = FLOOR_SMOOTH_NARROW + 2;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let errors = 0;
 const fail = m => { console.error("FAIL:", m); errors++; };
 const pass = m => console.log("PASS:", m);
 
-/* kingofthehill is a menu-screen backdrop baked as tiles (45k px, UI strokes
-   as "terrain") — not a level. solidRects trips on it by design (as before);
-   physics assertions skip it. */
+/* kingofthehill is a menu-screen backdrop baked as tiles (UI strokes as
+   "terrain") — not a level. Its collider build is covered by the dedicated
+   budget test (§7); spawn/settle/pickup physics assertions skip it. */
 const SKIP_PHYS = new Set(["kingofthehill"]);
 
 const overlapArea = (map, p) => {
@@ -174,82 +185,172 @@ const overlapArea = (map, p) => {
   else pass("despike: no large tufts on 1outpost");
 }
 
-/* ---- 2. skins: convex quads tracking the surface; sane body counts ---- */
+/* ---- 2. segments: closed loops on the art surface, full coverage ---- */
 for (const [id] of MAPS) {
   if (SKIP_PHYS.has(id)) continue;
   const b = loadMapBundle(id);
   const map = new GameMap(b.mapJson, b.maskData);
-  const { rects, skins } = map.solidShapes();
-  let convexBad = 0;
-  for (const s of skins) {
-    const q = [[s.x0, s.y0], [s.x1, s.y1], [s.x1, s.y1 + s.depth], [s.x0, s.y0 + s.depth]];
-    let sign = 0;
+  const { segments } = map.solidShapes();
+  const mask = map.mask, cols = map.maskCols, rows = (mask.length / cols) | 0, st = map.maskStep;
+  let bad = 0;
+
+  /* (a) non-empty and within the body budget */
+  if (!segments.length) { fail(`${id}: no collider segments`); continue; }
+  if (segments.length > SEGMENT_BUDGET) { fail(`${id}: body budget blown (${segments.length})`); bad++; }
+
+  /* (b) closure: every segment start exactly matches another segment's end
+     (shared loop vertices — no cracks for soldiers to fall through) */
+  const ends = new Set(segments.map(s => s.bx + "," + s.by));
+  let open = 0;
+  for (const s of segments) if (!ends.has(s.ax + "," + s.ay)) open++;
+  if (open) { fail(`${id}: ${open} unclosed segment joints`); bad++; }
+
+  /* (c) endpoint fidelity (EXACT): every endpoint is a true mask-boundary
+     vertex — on-grid with mixed solid/air incident cells */
+  const isBoundaryVertex = (x, y) => {
+    const gx = Math.round(x / st), gy = Math.round(y / st);
+    if (Math.abs(gx * st - x) > 0.01 || Math.abs(gy * st - y) > 0.01) return false;
+    let s = 0, a = 0;
+    for (const [cx, cy] of [[gx - 1, gy - 1], [gx, gy - 1], [gx - 1, gy], [gx, gy]]) {
+      const solid = cx >= 0 && cy >= 0 && cx < cols && cy < rows && mask[cy * cols + cx] === 1;
+      solid ? s++ : a++;
+    }
+    return s > 0 && a > 0;
+  };
+  let endBad = 0;
+  for (const s of segments) {
+    if (!isBoundaryVertex(s.ax, s.ay) || !isBoundaryVertex(s.bx, s.by)) endBad++;
+  }
+  if (endBad) { fail(`${id}: ${endBad}/${segments.length} segments off-surface endpoints`); bad++; }
+
+  /* (d) midpoint tracking: the art surface stays within the smoother
+     contract of every chord — asymmetric: teeth cut outward to TOOTH,
+     narrow cracks bridged inward to NOTCH_DEEP (a WIDE departure means a
+     pit got lidded or a hill buried). Marches at 1px (finer than the 2px
+     cells) and compares CONSECUTIVE samples: a 2px probe at 2px stride
+     can phase-miss a crossing that falls exactly between two samples. */
+  let trackBad = 0;
+  for (const s of segments) {
+    const mx = (s.ax + s.bx) / 2, my = (s.ay + s.by) / 2;
+    let prev = null, near = false;
+    for (let d = -TRACK_OUT; d <= TRACK_IN && !near; d += 1) {
+      const c = map.solidAtPixel(mx + s.nx * d, my + s.ny * d);
+      if (prev !== null && c !== prev) near = true;
+      prev = c;
+    }
+    if (!near) trackBad++;
+  }
+  if (trackBad) { fail(`${id}: ${trackBad}/${segments.length} chords off-surface`); bad++; }
+
+  /* (e) quad sanity: convex non-degenerate extrusion, inward normal into solid */
+  let quadBad = 0, normBad = 0;
+  for (const s of segments) {
+    const q = [[s.ax, s.ay], [s.bx, s.by],
+      [s.bx + s.nx * s.depth, s.by + s.ny * s.depth],
+      [s.ax + s.nx * s.depth, s.ay + s.ny * s.depth]];
+    let sign = 0, area = 0;
     for (let i = 0; i < 4; i++) {
       const [ax, ay] = q[i], [bx, by] = q[(i + 1) % 4], [cx, cy] = q[(i + 2) % 4];
       const cr = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-      if (cr !== 0) { sign = sign || Math.sign(cr); if (Math.sign(cr) !== sign) { convexBad++; break; } }
+      if (cr !== 0) { sign = sign || Math.sign(cr); if (Math.sign(cr) !== sign) { quadBad++; break; } }
+      area += (q[(i + 1) % 4][0] - ax) * (q[(i + 1) % 4][1] + ay);
     }
+    if (Math.abs(area) / 2 < 1) quadBad++;
+    /* rock must sit within the notch-bridging contract inward (bridged
+       crack bottoms read solid only 10s of px past the face — a coarse
+       stride steps over thin floors, hence 0.5px). Past TRACK_IN the
+       normal points at void: a flipped or runaway chord. */
+    const mx = (s.ax + s.bx) / 2, my = (s.ay + s.by) / 2;
+    let inward = false;
+    for (let d = 0.5; d <= TRACK_IN && !inward; d += 0.5) {
+      if (map.solidAtPixel(mx + s.nx * d, my + s.ny * d)) inward = true;
+    }
+    if (!inward) normBad++;
   }
-  if (convexBad) fail(`${id}: ${convexBad} non-convex skins`);
-  /* skin top edge must ride the mask surface: air just above the midpoint,
-     and the topmost solid in that column within a few px of the edge
-     (thin floating islands read "air below" — the surface match is the
-     invariant, and it also rejects lids bridged over pits) */
-  const surfY = (x, yGuess) => {
-    for (let d = 0; d <= 120; d += 2) {
-      if (map.solidAtPixel(x, yGuess - d)) return yGuess - d;
-      if (map.solidAtPixel(x, yGuess + d)) return yGuess + d;
-    }
-    return null;
+  if (quadBad) { fail(`${id}: ${quadBad} degenerate/non-convex quads`); bad++; }
+  if (normBad) { fail(`${id}: ${normBad} inward normals miss the solid`); bad++; }
+
+  /* (f) coverage: every mask boundary cell has a segment nearby, within
+     that segment's contract allowance (spatial hash over segment bounds;
+     span-aware: deep notch bottoms are only legal under narrow bridges,
+     tooth tips under any cutter; a missing wall/loop reads 100s of px off).
+     ±3 hash rings cover the 68px reach (3*32). */
+  const HS = 32;
+  const hash = new Map();
+  const segLen = segments.map(s => Math.hypot(s.bx - s.ax, s.by - s.ay));
+  segments.forEach((s, i) => {
+    const x0 = Math.min(s.ax, s.bx), x1 = Math.max(s.ax, s.bx);
+    const y0 = Math.min(s.ay, s.by), y1 = Math.max(s.ay, s.by);
+    for (let gx = (x0 / HS) | 0; gx <= (x1 / HS) | 0; gx++)
+      for (let gy = (y0 / HS) | 0; gy <= (y1 / HS) | 0; gy++) {
+        const k = gx + "," + gy;
+        let l = hash.get(k);
+        if (!l) { l = []; hash.set(k, l); }
+        l.push(i);
+      }
+  });
+  const segDist = (x, y, s) => {
+    const dx = s.bx - s.ax, dy = s.by - s.ay;
+    const t = Math.min(1, Math.max(0, ((x - s.ax) * dx + (y - s.ay) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(x - (s.ax + dx * t), y - (s.ay + dy * t));
   };
-  let trackBad = 0;
-  for (const s of skins) {
-    const mx = (s.x0 + s.x1) / 2, my = (s.y0 + s.y1) / 2;
-    /* sub-sample pebbles float over flat floors (harmless — feet ride under
-       them); only a WIDE buried span means the chord cuts through a bump */
-    const ab = dx => map.solidAtPixel(mx + dx, my - 10);
-    if (ab(0) && ab(-8) && ab(8)) { trackBad++; continue; }
-    /* sub-foot notches (bridged on purpose — feet span them) and tile seams
-       read off-surface at the midpoint; only a WIDE lid (a real pit) fails */
-    const off = dx => { const sy = surfY(mx + dx, my); return sy === null || Math.abs(sy - my) > 10; };
-    if (off(0) && off(-8) && off(8) && off(-16) && off(16)) trackBad++;
-  }
-  if (trackBad) fail(`${id}: ${trackBad}/${skins.length} skins off-surface`);
-  /* skins arrive x-sorted, disjoint-or-touching at shared joints (endpoint
-     contact is intended; both sides snap the joint identically, so skinTopAt
-     reads the exact same Y whichever side the binary search lands on) */
-  let orderBad = 0;
-  for (let i = 1; i < skins.length; i++) if (skins[i].x0 < skins[i - 1].x1) orderBad++;
-  if (orderBad) fail(`${id}: ${orderBad} skins out of order/overlapping`);
-  /* coverage: every walkable profile sample must sit under the skin line —
-     bridged notches count (the chord rides above both rim samples), while
-     walls/steps/gaps stay rect-owned by design */
-  const { prof, step } = map.surfaceProfile(8);
-  let pairs = 0, covered = 0;
-  for (let i = 1; i < prof.length; i++) {
-    const a = prof[i - 1], c = prof[i];
-    if (a < 0 || c < 0) continue;
-    const dy = Math.abs(c - a);
-    if (dy / step > 2.0 || dy > 12) continue;
-    pairs++;
-    const xa = (i - 1) * step + step / 2, xb = Math.min(i * step + step / 2, map.w - 1);
-    if (skinTopAt(skins, xa) !== null && skinTopAt(skins, xb) !== null) covered++;
-  }
-  const ratio = pairs ? covered / pairs : 1;
-  if (ratio < 0.95) fail(`${id}: skin coverage ${covered}/${pairs} (${ratio.toFixed(2)})`);
-  /* tuck: no bulk rect may poke above the skin line spanning its columns —
-     sampled at cell centers, exactly where the tuck itself tests */
-  let pokeBad = 0;
-  for (const r of rects) {
-    for (let x = r.x + 4; x < r.x + r.w; x += 8) {
-      const sy = skinTopAt(skins, x);
-      if (sy !== null && r.y < sy - 0.5) { pokeBad++; break; }
+  let bound = 0, cov = 0;
+  for (let r = 1; r < rows - 1; r += 4) {
+    for (let c = 1; c < cols - 1; c += 4) {
+      if (mask[r * cols + c] !== 1) continue;
+      if (mask[(r - 1) * cols + c] === 1 && mask[(r + 1) * cols + c] === 1 &&
+          mask[r * cols + c - 1] === 1 && mask[r * cols + c + 1] === 1) continue;
+      bound++;
+      const x = c * st + st / 2, y = r * st + st / 2;
+      let ok = false;
+      const gx = (x / HS) | 0, gy = (y / HS) | 0;
+      for (let ix = gx - 3; ix <= gx + 3 && !ok; ix++)
+        for (let iy = gy - 3; iy <= gy + 3 && !ok; iy++) {
+          const l = hash.get(ix + "," + iy);
+          if (!l) continue;
+          for (const i of l) {
+            const allow = segLen[i] <= COV_NARROW ? TRACK_IN : TRACK_OUT;
+            if (segDist(x, y, segments[i]) <= allow) { ok = true; break; }
+          }
+        }
+      if (ok) cov++;
     }
   }
-  if (pokeBad) fail(`${id}: ${pokeBad} bulk rects poke above the skin line`);
-  if (!convexBad && !trackBad && !orderBad && ratio >= 0.95 && !pokeBad)
-    pass(`${id}: ${skins.length} convex skins on-surface (${covered}/${pairs} pairs), ${rects.length} tucked bulk rects`);
-  if (rects.length + skins.length > 15000) fail(`${id}: body budget blown (${rects.length + skins.length})`);
+  const ratio = bound ? cov / bound : 1;
+  if (ratio < 0.99) { fail(`${id}: boundary coverage ${cov}/${bound} (${ratio.toFixed(3)})`); bad++; }
+
+  /* (g) smoothness: the walk surface must not wiggle more than the art —
+     stairs would multiply total variation; chords track or undercut it */
+  const stepX = 8;
+  const mhs = [], gys = [];
+  for (let x = stepX; x < map.w - stepX; x += stepX) {
+    const g = map.groundBelow(x, 0, map.h);
+    if (!g) { mhs.push(-1); gys.push(-1); continue; }
+    gys.push(g.y);
+    let h = Infinity;
+    for (const s of segments) {
+      if (s.ny < 0.3) continue;
+      const x0 = Math.min(s.ax, s.bx), x1 = Math.max(s.ax, s.bx);
+      if (x < x0 || x > x1 || x1 - x0 < 1) continue;
+      const t = (x - s.ax) / (s.bx - s.ax || 1e-9);
+      if (t < 0 || t > 1) continue;
+      const y = s.ay + (s.by - s.ay) * t;
+      if (Math.abs(y - g.y) < TRACK_OUT && y < h) h = y;
+    }
+    mhs.push(h === Infinity ? -1 : h);
+  }
+  const tv = arr => {
+    let t = 0;
+    for (let i = 1; i < arr.length; i++) {
+      if (arr[i] < 0 || arr[i - 1] < 0) continue;
+      t += Math.abs(arr[i] - arr[i - 1]);
+    }
+    return t;
+  };
+  const tvArt = tv(gys), tvMat = tv(mhs);
+  if (tvMat > tvArt * 1.25 + 50) { fail(`${id}: matter TV ${tvMat.toFixed(0)} vs art TV ${tvArt.toFixed(0)}`); bad++; }
+
+  if (!bad) pass(`${id}: ${segments.length} closed on-surface segments (${cov}/${bound} boundary), TV ${tvMat.toFixed(0)}/${tvArt.toFixed(0)}`);
 }
 
 /* ---- 3. respawn: clear, grounded, settled standing ---- */
@@ -342,6 +443,10 @@ for (const [id] of MAPS) {
   const rotated = Object.entries(menuRot.frames).filter(([, f]) => f.rot).map(([n]) => n);
   if (rotated.length) fail(`rotated atlas frames need origin handling: ${rotated.slice(0, 5).join(",")}`);
   else pass("atlas has no rotated frames");
+  /* jetpack flames + flamethrower share the menu-atlas flame frame — the
+     Phaser particle emitter + bullet sprites fail silently without it */
+  if (!menuRot.frames["flame1.png"]) fail("menu atlas lost flame1.png (jet/flamer art)");
+  else pass("menu atlas keeps flame1.png for jet + flamer art");
 
   /* collider h must cover the tallest skin stack (legacy full-box anchors) */
   const menu = JSON.parse(fs.readFileSync(path.join(ROOT, "data/atlas/menuTexture.json"), "utf8"));
@@ -402,6 +507,146 @@ for (const [id] of MAPS) {
     }
     if (worst > -1) fail(`hip joint daylight: worst overlap ${(-worst).toFixed(2)}px (${worstC})`);
     else pass(`hip joint tucked: worst overlap ${(-worst).toFixed(2)}px over all skin combos`);
+  }
+}
+
+/* ---- 6. smoothness: synthetic slope climb (no bumps/stalls) ----
+   A hand-built mask (straight 30° slope between flats) pins the physical
+   contract: steady ascent, zero lip-catches. The soldier climbs uphill on
+   purpose: stairs nose-ride smooth downhill but pop riser-by-riser uphill,
+   so the climb discriminates. Bumps count only where the ART is smooth (a real art
+   ledge legitimately pops the soldier). A solid cover slab hangs over the
+   whole run, so the climb floor is NOT the topmost surface in its columns —
+   the old topmost-only skins left exactly such floors as 8px stairs, and
+   this test fails on that design (verified via worktree A/B). */
+{
+  const TW = 128, W = 16, H = 6; // 2048 x 768 px
+  const json = {
+    w: W, h: H, tileW: TW, tileH: TW,
+    tilesets: [{ firstgid: 1, image: "synth.png" }],
+    layers: [{ name: "tile", w: W, h: H, data: new Array(W * H).fill(0) }],
+    objects: [],
+  };
+  const step = 2, cols = (W * TW) / step, rows = (H * TW) / step;
+  const floorY = x => (x < 800 ? 256 : x < 1400 ? 256 + (x - 800) * Math.tan(Math.PI / 6) : 256 + 600 * Math.tan(Math.PI / 6));
+  const mask = new Uint8Array(cols * rows);
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const wy = (r + 1) * step;
+      if (wy >= floorY(c * step)) mask[r * cols + c] = 1; // slide floor
+      if (wy >= 40 && wy < 90) mask[r * cols + c] = 1; // cover slab overhead
+    }
+  const sim = new WorldSim({
+    mapJson: json, maskData: { mask, step, cols },
+    frameSize: () => ({ w: 60, h: 40 }), mode: "solo",
+  });
+  const p = sim.addPlayer({ id: "slide", name: "S" });
+  p.x = 1900; p.y = (256 + 600 * Math.tan(Math.PI / 6)) - p.h; p.vx = 0; p.vy = 0; p.ensureBody(true);
+  p.input = { left: true, right: false, jet: false, fire: false, aimX: p.cx() - 300, aimY: p.cy() };
+  const flatYs = [];
+  const slopePts = [];
+  let bumps = 0, stalls = 0, stallRun = 0, prevY = null, prevArt = null;
+  for (let s = 0; s < 900 && p.x > 100 && !p.dead; s++) {
+    sim.step(1 / 60);
+    if (!p.grounded) { prevY = null; prevArt = null; continue; }
+    const g = sim.map.groundBelow(p.cx(), 100, 560); // below the cover slab: the slide floor
+    const art = g ? g.y : null;
+    if (prevY !== null && art !== null && prevArt !== null) {
+      /* a bump is matter motion WITHOUT art motion (real ledges excluded) */
+      if (Math.abs(p.y - prevY) > 4 && Math.abs(art - prevArt) <= 2) bumps++;
+    }
+    if (Math.abs(p.vx) < 30) { stallRun++; if (stallRun === 10) stalls++; }
+    else stallRun = 0;
+    if (p.x > 150 && p.x < 750) flatYs.push(p.y);
+    if (p.x > 900 && p.x < 1300) slopePts.push([p.x, p.y]);
+    prevY = p.y; prevArt = art;
+  }
+  const mean = flatYs.reduce((a, v) => a + v, 0) / Math.max(1, flatYs.length);
+  const sd = Math.sqrt(flatYs.reduce((a, v) => a + (v - mean) ** 2, 0) / Math.max(1, flatYs.length));
+  /* slope residual vs best-fit line (a straight chord descends straight) */
+  const n = slopePts.length;
+  const sx = slopePts.reduce((a, q) => a + q[0], 0), sy = slopePts.reduce((a, q) => a + q[1], 0);
+  const sxx = slopePts.reduce((a, q) => a + q[0] * q[0], 0), sxy = slopePts.reduce((a, q) => a + q[0] * q[1], 0);
+  const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx || 1);
+  const icept = (sy - slope * sx) / Math.max(1, n);
+  const resid = Math.sqrt(slopePts.reduce((a, q) => a + (q[1] - (slope * q[0] + icept)) ** 2, 0) / Math.max(1, n));
+  if (p.dead) fail("synthetic climb died");
+  else if (p.x > 150) fail(`synthetic climb stalled at x=${p.x.toFixed(0)}`);
+  else if (bumps) fail(`synthetic climb: ${bumps} bumps on smooth art`);
+  else if (stalls) fail(`synthetic climb: ${stalls} lip stalls`);
+  else if (sd > 0.6) fail(`synthetic flat jitter sd=${sd.toFixed(2)}px`);
+  else if (resid > 1.0) fail(`synthetic slope residual sd=${resid.toFixed(2)}px`);
+  else pass(`synthetic climb: flat sd=${sd.toFixed(2)}px, slope residual=${resid.toFixed(2)}px, 0 bumps/stalls`);
+}
+
+/* ---- 6b. real-map teeth: settle + walk the 1outpost grass plateau ----
+   The plateau top (x 996-1056, art y=264) used to trace as a zigzag of
+   grass teeth the 44px box could not sit on (jitter/bounce). The floor
+   smoother bridges it to one flat chord: a dropped soldier settles dead
+   still and walks the flat with zero bumps. Ground truth pins: mask-top
+   profile is flat 264 across the run, needle notch at x=1068 bridged. */
+{
+  const b = loadMapBundle("1outpost");
+  const sim = new WorldSim({ mapJson: b.mapJson, maskData: b.maskData, frameSize: b.frameSize, mode: "solo" });
+  const p = sim.addPlayer({ id: "teeth", name: "T" });
+  p.input = {};
+  /* drop onto the plateau from above */
+  p.x = 1026 - p.w / 2; p.y = 264 - 120; p.vx = 0; p.vy = 0; p.ensureBody(true);
+  let rest = 0;
+  for (let s = 0; s < 600 && rest < 10; s++) {
+    sim.step(1 / 60);
+    if (!p.dead && p.grounded && Math.abs(p.vx) < 8 && p.vy === 0) rest++;
+    else rest = 0;
+  }
+  const ys = [];
+  for (let s = 0; s < 60; s++) { sim.step(1 / 60); ys.push(p.y); }
+  const mean = ys.reduce((a, v) => a + v, 0) / ys.length;
+  const sd = Math.sqrt(ys.reduce((a, v) => a + (v - mean) ** 2, 0) / ys.length);
+  const ov = overlapArea(sim.map, p);
+  if (p.dead) fail("teeth plateau: died settling");
+  else if (!p.grounded) fail(`teeth plateau: airborne after settle (${p.x.toFixed(0)},${p.y.toFixed(0)})`);
+  else if (ov > p.w * p.h * 0.05) fail(`teeth plateau: buried after settle (overlap ${ov.toFixed(0)})`);
+  else if (sd > 0.6) fail(`teeth plateau: sitting jitter sd=${sd.toFixed(2)}px`);
+  else pass(`teeth plateau: settles still (sd=${sd.toFixed(2)}px)`);
+  /* walk the flat run: matter must not move without art motion */
+  p.x = 1000; p.y = 264 - p.h; p.vx = 0; p.vy = 0; p.ensureBody(true);
+  p.input = { left: false, right: true, jet: false, fire: false, aimX: p.cx() + 300, aimY: p.cy() };
+  let bumps = 0, prevY = null, prevArt = null;
+  const walkYs = [];
+  for (let s = 0; s < 300 && p.cx() < 1052 && !p.dead; s++) {
+    sim.step(1 / 60);
+    if (!p.grounded) { prevY = null; prevArt = null; continue; }
+    const g = sim.map.groundBelow(p.cx(), 100, 560);
+    const art = g ? g.y : null;
+    if (prevY !== null && art !== null && prevArt !== null) {
+      if (Math.abs(p.y - prevY) > 4 && Math.abs(art - prevArt) <= 2) bumps++;
+    }
+    if (p.cx() > 1005) walkYs.push(p.y);
+    prevY = p.y; prevArt = art;
+  }
+  const wmean = walkYs.reduce((a, v) => a + v, 0) / Math.max(1, walkYs.length);
+  const wsd = Math.sqrt(walkYs.reduce((a, v) => a + (v - wmean) ** 2, 0) / Math.max(1, walkYs.length));
+  if (p.dead) fail("teeth plateau: died walking");
+  else if (bumps) fail(`teeth plateau: ${bumps} bumps walking the flat`);
+  else if (wsd > 1.0) fail(`teeth plateau: walk jitter sd=${wsd.toFixed(2)}px`);
+  else pass(`teeth plateau: 0 bumps walking the flat (sd=${wsd.toFixed(2)}px)`);
+  sim.removePlayer(p.id);
+}
+
+/* ---- 7. kingofthehill: pathological map stays within budget, no crash ----
+   The old builder hard-exited the process here (exit 99); the budget keeps
+   the biggest loops and drops dust first. Kept loops must still be closed. */
+{
+  const b = loadMapBundle("kingofthehill");
+  const map = new GameMap(b.mapJson, b.maskData);
+  const { segments } = map.solidShapes();
+  if (segments.length > SEGMENT_BUDGET) fail(`kingofthehill over budget (${segments.length})`);
+  else {
+    const ends = new Set(segments.map(s => s.bx + "," + s.by));
+    let open = 0;
+    for (const s of segments) if (!ends.has(s.ax + "," + s.ay)) open++;
+    if (open) fail(`kingofthehill: ${open} unclosed joints after budget drop`);
+    else pass(`kingofthehill: ${segments.length} closed segments within budget`);
   }
 }
 

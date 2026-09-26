@@ -6,3 +6,13 @@ export function inputPack(i) {
 export function inputUnpack(d) {
   return { left: !!d.l, right: !!d.r, jet: !!d.j, fire: !!d.f, use: !!d.u, aimX: d.x, aimY: d.y };
 }
+
+/* fresh neutral input (spawn default, test setup) */
+export function emptyInput() {
+  return { left: false, right: false, jet: false, fire: false, use: false, aimX: 0, aimY: 0 };
+}
+
+/* fill missing fields so physics/bots never see undefined flags */
+export function normalizeInput(partial) {
+  return Object.assign(emptyInput(), partial || {});
+}

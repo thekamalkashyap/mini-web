@@ -67,7 +67,9 @@ only under the flip; some spawns still intersect floating cave geometry
 Object taxonomy: `sp_p_NN` spawns · `wp_p_NN` weapon pickups (property
 `weapon` = comma-list, cycled on grab) · `fp_b_N` flag/fuel stations
 (sprite `flagStationBlue/Orange`) · `ctf_sp_N`/`ctf_wp_N` CTF spawns/weapons ·
-`spritebg`/`spritefg` decor (palmTree, bushFan, bushPalm).
+`spritebg`/`spritefg` decor (palmTree, bushFan, bushPalm — repeat names gain
+`_N` suffixes, matched by prefix; center-anchored at the flipped point, the
+author sights the whole sprite against the art: 51-sprite in-situ audit).
 24 maps shipped: Outpost → Deadlock, Lunarcy (moon), Icebox/Snowblind (snow),
 Pyramid/Catacombs/Lost Tomb (desert), plus KOTH/survival/training.
 
